@@ -19,6 +19,8 @@ class AiService {
     required RotaRow rotaRow,
     required List<OcrElement> dateHeaders,
     required Map<OcrElement, OcrElement> cellDateHeaders,
+    List<RotaRow> allRows = const [],
+    String rawOcrText = '',
     DateTime? referenceDate,
   }) async {
     final rotaDate = referenceDate ?? DateTime.now();
@@ -51,6 +53,8 @@ class AiService {
       rotaRow: rotaRow,
       dateHeaders: dateHeaders,
       cellDateHeaders: cellDateHeaders,
+      allRows: allRows,
+      rawOcrText: rawOcrText,
       referenceDate: rotaDate,
     );
     final response = await model.generateContent([Content.text(prompt)]);
@@ -60,21 +64,57 @@ class AiService {
     }
 
     try {
-      final decoded = jsonDecode(text);
-      if (decoded is! List) {
-        throw const FormatException('Expected a JSON array.');
-      }
-      final shifts = decoded.map((item) {
-        if (item is! Map) throw const FormatException('Invalid shift item.');
-        return ParsedShift.fromJson(Map<String, dynamic>.from(item));
-      }).toList()..sort((a, b) => a.date.compareTo(b.date));
+      final shifts = _parseResponse(text, rotaDate);
       return _mergeShifts(shifts, localShifts);
     } on FormatException catch (error) {
       throw AiServiceException(
         'Gemini returned unusable JSON: ${error.message}',
+        rawResponse: text,
       );
     } on Object {
-      throw const AiServiceException('Gemini returned unusable JSON.');
+      throw AiServiceException(
+        'Gemini returned unusable JSON.',
+        rawResponse: text,
+      );
+    }
+  }
+
+  List<ParsedShift> _parseResponse(String response, DateTime referenceDate) {
+    final cleaned = _cleanJson(response);
+    try {
+      final decoded = jsonDecode(cleaned);
+      if (decoded is! List) {
+        throw const FormatException('Expected a JSON array.');
+      }
+      return decoded.map((item) {
+        if (item is! Map) throw const FormatException('Invalid shift item.');
+        return ParsedShift.fromJson(Map<String, dynamic>.from(item));
+      }).toList()..sort((a, b) => a.date.compareTo(b.date));
+    } on FormatException {
+      final lines = RegExp(
+        r'^\s*(0?[1-9]|[12][0-9]|3[01])\s*:\s*([A-Za-z0-9_-]+)\s*$',
+        multiLine: true,
+      ).allMatches(response).toList();
+      if (lines.isEmpty) rethrow;
+      final lastDay = DateTime(
+        referenceDate.year,
+        referenceDate.month + 1,
+        0,
+      ).day;
+      return [
+        for (final line in lines)
+          if (int.parse(line.group(1)!) <= lastDay)
+            ParsedShift(
+              date: DateTime(
+                referenceDate.year,
+                referenceDate.month,
+                int.parse(line.group(1)!),
+              ),
+              code: line.group(2)!.toUpperCase(),
+              type: 'UNKNOWN',
+              time: '',
+            ),
+      ];
     }
   }
 
@@ -83,14 +123,19 @@ class AiService {
     required RotaRow rotaRow,
     required List<OcrElement> dateHeaders,
     required Map<OcrElement, OcrElement> cellDateHeaders,
+    required List<RotaRow> allRows,
+    required String rawOcrText,
     required DateTime referenceDate,
   }) {
     final rowCells = rotaRow.cells.map((cell) {
       final header = cellDateHeaders[cell];
       return {
-        'text': cell.text,
-        'x': cell.centerX.round(),
-        'y': cell.centerY.round(),
+        'rawText': cell.text,
+        'columnIndex': cell.columnIndex,
+        'columnX': cell.columnX,
+        'centerX': cell.centerX.round(),
+        'centerY': cell.centerY.round(),
+        'headerText': cell.headerText,
         'matchedHeader': header == null
             ? null
             : {'text': header.text, 'x': header.centerX.round()},
@@ -98,6 +143,9 @@ class AiService {
     }).toList();
     final headers = dateHeaders
         .map((header) => {'text': header.text, 'x': header.centerX.round()})
+        .toList();
+    final rows = allRows
+        .map((row) => row.cells.map((cell) => cell.text).join(' | '))
         .toList();
 
     return '''
@@ -111,17 +159,17 @@ day number. Do not invent a date outside the header columns.
 Employee: $employeeName
 Date/header cells: ${jsonEncode(headers)}
 Selected employee row: ${jsonEncode(rowCells)}
+Other OCR rows (may contain a legend): ${jsonEncode(rows)}
+Raw OCR text: $rawOcrText
 
 Return ONLY a JSON array. Each item must exactly have:
-{"date":"YYYY-MM-DD","type":"DAY/NIGHT/OFF/LEAVE","time":"HH:mm - HH:mm"}
+{"date":"YYYY-MM-DD","code":"raw OCR code","type":"UNKNOWN","time":"HH:mm - HH:mm"}
 
-Interpret common codes where supported by the layout/context: DO means OFF,
-AL means LEAVE, OFF means OFF, DAY means DAY, and NIGHT means NIGHT. If a rota
-legend is visible, it overrides defaults and defines the meaning of every code.
-If no legend is visible, use this common convention: A means MORNING, B means
-EVENING, and C means NIGHT. Preserve other short letter codes as their code in
-the type field rather than dropping the shift; use an empty time when no time
-is available. Include every supported header/cell pair as a full ISO date.
+If a legend is visible in the supplied OCR, use it. Otherwise do not assume
+that A, B, C, DO, or any other code has a universal meaning. Preserve the raw
+code and return type UNKNOWN with an empty time when the meaning is unknown.
+Only return a shift when its header provides a full unambiguous date. Include
+the original code in a `code` field for every item.
 ''';
   }
 
@@ -134,39 +182,37 @@ is available. Include every supported header/cell pair as a full ISO date.
     if (dateHeaders.isEmpty) return const [];
 
     final shifts = <ParsedShift>[];
-    final lastDay = DateTime(referenceDate.year, referenceDate.month + 1, 0)
-        .day;
+    final lastDay = DateTime(
+      referenceDate.year,
+      referenceDate.month + 1,
+      0,
+    ).day;
     for (final cell in rotaRow.cells) {
       final header = cellDateHeaders[cell];
-      final day = header == null ? null : _dayNumber(header.text);
-      if (day == null || day > lastDay) continue;
+      final day = header == null ? null : _fullDate(header.text);
+      if (day == null ||
+          day.month != referenceDate.month ||
+          day.day > lastDay) {
+        continue;
+      }
+      final code = cell.text.trim().toUpperCase();
+      if (!_universalShiftCode(code)) continue;
 
-      final type = switch (cell.text.trim().toUpperCase()) {
-        'DO' || 'OFF' => 'OFF',
-        'AL' || 'LEAVE' => 'LEAVE',
-        'DAY' => 'DAY',
-        'NIGHT' => 'NIGHT',
-        'A' => 'MORNING',
-        'B' => 'EVENING',
-        'C' => 'NIGHT',
-        _ => _universalShiftCode(cell.text),
-      };
-      if (type == null) continue;
-
-      shifts.add(
-        ParsedShift(
-          date: DateTime(referenceDate.year, referenceDate.month, day),
-          type: type,
-          time: '',
-        ),
-      );
+      shifts.add(ParsedShift(date: day, code: code, type: 'UNKNOWN', time: ''));
     }
     return shifts..sort((a, b) => a.date.compareTo(b.date));
   }
 
-  int? _dayNumber(String value) {
-    final match = RegExp(r'\b(0?[1-9]|[12][0-9]|3[01])\b').firstMatch(value);
-    return match == null ? null : int.tryParse(match.group(1)!);
+  DateTime? _fullDate(String value) {
+    final iso = RegExp(
+      r'\b(20\d{2})[-/]([01]?\d)[-/]([0-3]?\d)\b',
+    ).firstMatch(value);
+    if (iso != null) {
+      return DateTime.tryParse(
+        '${iso.group(1)}-${iso.group(2)!.padLeft(2, '0')}-${iso.group(3)!.padLeft(2, '0')}',
+      );
+    }
+    return null;
   }
 
   List<ParsedShift> _mergeShifts(
@@ -179,29 +225,38 @@ is available. Include every supported header/cell pair as a full ISO date.
     for (final shift in interpreted) {
       merged[_shiftKey(shift)] = shift;
     }
-    return merged.values.toList()
-      ..sort((a, b) => a.date.compareTo(b.date));
+    return merged.values.toList()..sort((a, b) => a.date.compareTo(b.date));
   }
 
   String _shiftKey(ParsedShift shift) {
     final date = shift.date.toIso8601String().substring(0, 10);
-    return '$date:${shift.type}';
+    return '$date:${shift.code.isEmpty ? shift.type : shift.code}';
   }
 
-  String? _universalShiftCode(String value) {
+  bool _universalShiftCode(String value) {
     final code = value.trim().toUpperCase();
-    if (RegExp(r'^[A-Z]{1,3}$').hasMatch(code) &&
-        !{'NAME', 'TOTAL', 'ROTA'}.contains(code)) {
-      return code;
+    return RegExp(r'^[A-Z0-9]{1,4}$').hasMatch(code) &&
+        !{'NAME', 'TOTAL', 'ROTA'}.contains(code);
+  }
+
+  String _cleanJson(String value) {
+    var cleaned = value.trim();
+    cleaned = cleaned.replaceFirst(RegExp(r'^```(?:json)?\s*'), '');
+    cleaned = cleaned.replaceFirst(RegExp(r'\s*```$'), '');
+    final start = cleaned.indexOf('[');
+    final end = cleaned.lastIndexOf(']');
+    if (start >= 0 && end >= start) {
+      cleaned = cleaned.substring(start, end + 1);
     }
-    return null;
+    return cleaned.trim();
   }
 }
 
 class AiServiceException implements Exception {
   final String message;
+  final String? rawResponse;
 
-  const AiServiceException(this.message);
+  const AiServiceException(this.message, {this.rawResponse});
 
   @override
   String toString() => message;

@@ -9,6 +9,8 @@ class ReviewScreen extends StatefulWidget {
   final RotaRow? rotaRow;
   final List<OcrElement> dateHeaders;
   final Map<OcrElement, OcrElement> cellDateHeaders;
+  final List<RotaRow> allRows;
+  final String rawOcrText;
 
   const ReviewScreen({
     super.key,
@@ -16,6 +18,8 @@ class ReviewScreen extends StatefulWidget {
     required this.rotaRow,
     required this.dateHeaders,
     required this.cellDateHeaders,
+    this.allRows = const [],
+    this.rawOcrText = '',
   });
 
   @override
@@ -55,6 +59,8 @@ class _ReviewScreenState extends State<ReviewScreen> {
         rotaRow: row,
         dateHeaders: widget.dateHeaders,
         cellDateHeaders: widget.cellDateHeaders,
+        allRows: widget.allRows,
+        rawOcrText: widget.rawOcrText,
       );
       if (!mounted) return;
       setState(() {
@@ -69,9 +75,12 @@ class _ReviewScreenState extends State<ReviewScreen> {
       });
     } on Object catch (error) {
       if (!mounted) return;
+      final details = error is AiServiceException && error.rawResponse != null
+          ? '\nRaw response: ${error.rawResponse}'
+          : '';
       setState(() {
         _isInterpreting = false;
-        _interpretationError = error.toString();
+        _interpretationError = '${error.toString()}$details';
         _showManualFallback = true;
       });
     }
@@ -191,6 +200,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
             'Review every shift before exporting it to your calendar.',
           ),
           const SizedBox(height: 20),
+          _buildStructuredDebug(),
           if (_isInterpreting)
             const Center(
               child: Column(
@@ -214,7 +224,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
                 ),
               ),
             if (_showManualFallback) _buildManualOcrHelp(),
-            if (_shifts.isEmpty)
+            if (_shifts.isEmpty && widget.rotaRow == null)
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 16),
                 child: Text('No reviewed shifts yet. Add one manually.'),
@@ -274,6 +284,35 @@ class _ReviewScreenState extends State<ReviewScreen> {
             return '${cell.text}${header == null ? '' : ' (header: ${header.text})'}';
           }).join(' | ')}',
           style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStructuredDebug() {
+    final row = widget.rotaRow;
+    if (row == null) return const SizedBox.shrink();
+    final cells = row.cells.where((cell) => cell.columnIndex != null);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'SELECTED EMPLOYEE: ${widget.selectedName}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            ...cells.map(
+              (cell) => Text(
+                'COLUMN ${cell.headerText ?? cell.columnIndex! + 1}\n'
+                'header: ${cell.headerText ?? '(uncertain)'}\n'
+                'cell: ${cell.text}  x:${cell.centerX.toStringAsFixed(0)}',
+                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+              ),
+            ),
+          ],
         ),
       ),
     );

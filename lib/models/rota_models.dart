@@ -6,6 +6,9 @@ class OcrElement {
   final double top;
   final double right;
   final double bottom;
+  int? columnIndex;
+  double? columnX;
+  String? headerText;
 
   OcrElement({
     required this.text,
@@ -13,6 +16,9 @@ class OcrElement {
     required this.top,
     required this.right,
     required this.bottom,
+    this.columnIndex,
+    this.columnX,
+    this.headerText,
   });
 
   double get centerX => (left + right) / 2;
@@ -25,6 +31,20 @@ class OcrElement {
         '(x:${left.toStringAsFixed(0)}, '
         'y:${top.toStringAsFixed(0)})';
   }
+}
+
+class RotaColumn {
+  final int index;
+  final double centerX;
+  final String headerText;
+  final List<OcrElement> headerElements;
+
+  const RotaColumn({
+    required this.index,
+    required this.centerX,
+    required this.headerText,
+    required this.headerElements,
+  });
 }
 
 class RotaRow {
@@ -54,6 +74,7 @@ class RotaData {
   final RotaRow? dateHeaderRow;
   final List<OcrElement> dateHeaders;
   final Map<OcrElement, OcrElement> cellDateHeaders;
+  final List<RotaColumn> columns;
 
   RotaData({
     required this.names,
@@ -63,6 +84,7 @@ class RotaData {
     required this.dateHeaderRow,
     required this.dateHeaders,
     required this.cellDateHeaders,
+    required this.columns,
   });
 }
 
@@ -70,16 +92,25 @@ class RotaData {
 /// a user can correct ambiguous rota conventions before export.
 class ParsedShift {
   DateTime date;
+  String code;
   String type;
   String time;
 
-  ParsedShift({required this.date, required this.type, required this.time});
+  ParsedShift({
+    required this.date,
+    required this.type,
+    required this.time,
+    this.code = '',
+  });
 
   factory ParsedShift.fromJson(Map<String, dynamic> json) {
     final dateValue = json['date'];
     final typeValue = json['type'];
+    final codeValue = json['code'];
     final timeValue = json['time'];
-    if (dateValue is! String || typeValue is! String || timeValue is! String) {
+    if (dateValue is! String ||
+        (typeValue is! String && codeValue is! String) ||
+        timeValue is! String) {
       throw const FormatException(
         'Each shift needs date, type, and time strings.',
       );
@@ -92,7 +123,10 @@ class ParsedShift {
 
     return ParsedShift(
       date: DateTime(date.year, date.month, date.day),
-      type: typeValue.trim().toUpperCase(),
+      code: (codeValue is String ? codeValue : typeValue as String)
+          .trim()
+          .toUpperCase(),
+      type: typeValue is String ? typeValue.trim().toUpperCase() : 'UNKNOWN',
       time: timeValue.trim(),
     );
   }
