@@ -37,6 +37,9 @@ dependencies:
   cupertino_icons: ^1.0.8
   image_picker: ^1.2.0
   google_mlkit_text_recognition: ^0.15.0
+  google_generative_ai: ^0.4.7
+  add_2_calendar: ^3.1.1
+  shared_preferences: ^2.5.5
 
 dev_dependencies:
   flutter_test:

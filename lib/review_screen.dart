@@ -1,27 +1,21 @@
 import 'package:flutter/material.dart';
 
-import 'ocr_service.dart';
-
-class Shift {
-  String date;
-  String type;
-  String time;
-
-  Shift({
-    required this.date,
-    required this.type,
-    required this.time,
-  });
-}
+import 'ai_service.dart';
+import 'calendar_service.dart';
+import 'models/rota_models.dart';
 
 class ReviewScreen extends StatefulWidget {
   final String selectedName;
   final RotaRow? rotaRow;
+  final List<OcrElement> dateHeaders;
+  final Map<OcrElement, OcrElement> cellDateHeaders;
 
   const ReviewScreen({
     super.key,
     required this.selectedName,
     required this.rotaRow,
+    required this.dateHeaders,
+    required this.cellDateHeaders,
   });
 
   @override
@@ -29,169 +23,258 @@ class ReviewScreen extends StatefulWidget {
 }
 
 class _ReviewScreenState extends State<ReviewScreen> {
-  final List<Shift> shifts = [
-    Shift(
-      date: 'August 1',
-      type: 'DAY',
-      time: '07:00 → 19:00',
-    ),
-    Shift(
-      date: 'August 2',
-      type: 'NIGHT',
-      time: '19:00 → 07:00',
-    ),
-    Shift(
-      date: 'August 3',
-      type: 'OFF',
-      time: '',
-    ),
-    Shift(
-      date: 'August 4',
-      type: 'DAY',
-      time: '07:00 → 19:00',
-    ),
-  ];
+  final AiService _aiService = AiService();
+  final CalendarService _calendarService = CalendarService();
+  final List<ParsedShift> _shifts = [];
 
-  void _editShift(int index) {
-    final shift = shifts[index];
+  bool _isInterpreting = true;
+  bool _isExporting = false;
+  String? _interpretationError;
+  bool _showManualFallback = false;
 
-    final typeController = TextEditingController(
-      text: shift.type,
-    );
+  @override
+  void initState() {
+    super.initState();
+    _interpretRota();
+  }
 
-    final timeController = TextEditingController(
-      text: shift.time,
-    );
+  Future<void> _interpretRota() async {
+    final row = widget.rotaRow;
+    if (row == null) {
+      setState(() {
+        _isInterpreting = false;
+        _interpretationError = 'No employee row was found in this scan.';
+        _showManualFallback = true;
+      });
+      return;
+    }
 
-    showDialog(
+    try {
+      final shifts = await _aiService.interpretRota(
+        employeeName: widget.selectedName,
+        rotaRow: row,
+        dateHeaders: widget.dateHeaders,
+        cellDateHeaders: widget.cellDateHeaders,
+      );
+      if (!mounted) return;
+      setState(() {
+        _shifts
+          ..clear()
+          ..addAll(shifts);
+        _isInterpreting = false;
+        _showManualFallback = shifts.isEmpty;
+        _interpretationError = shifts.isEmpty
+            ? 'No full dates could be safely interpreted from this rota.'
+            : null;
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isInterpreting = false;
+        _interpretationError = error.toString();
+        _showManualFallback = true;
+      });
+    }
+  }
+
+  Future<void> _editShift([ParsedShift? existing]) async {
+    final shift =
+        existing ??
+        ParsedShift(date: DateTime.now(), type: 'DAY', time: '07:00 - 19:00');
+    final typeController = TextEditingController(text: shift.type);
+    final timeController = TextEditingController(text: shift.time);
+    var selectedDate = shift.date;
+
+    final saved = await showDialog<bool>(
       context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: Text(shift.date),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text(existing == null ? 'Add shift' : 'Edit shift'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Date'),
+                subtitle: Text(_formatDate(selectedDate)),
+                trailing: const Icon(Icons.edit_calendar),
+                onTap: () async {
+                  final date = await showDatePicker(
+                    context: dialogContext,
+                    initialDate: selectedDate,
+                    firstDate: DateTime(2020),
+                    lastDate: DateTime(2100),
+                  );
+                  if (date != null) setDialogState(() => selectedDate = date);
+                },
+              ),
               TextField(
                 controller: typeController,
-                decoration: const InputDecoration(
-                  labelText: 'Shift type',
-                ),
+                textCapitalization: TextCapitalization.characters,
+                decoration: const InputDecoration(labelText: 'Shift type'),
               ),
               TextField(
                 controller: timeController,
                 decoration: const InputDecoration(
                   labelText: 'Time',
+                  hintText: '07:00 - 19:00 (empty for OFF/LEAVE)',
                 ),
               ),
             ],
           ),
           actions: [
             TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-              },
+              onPressed: () => Navigator.pop(dialogContext, false),
               child: const Text('Cancel'),
             ),
-            ElevatedButton(
-              onPressed: () {
-                setState(() {
-                  shift.type = typeController.text;
-                  shift.time = timeController.text;
-                });
-
-                Navigator.pop(context);
-              },
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
               child: const Text('Save'),
             ),
           ],
-        );
-      },
-    );
-  }
-
-  void _addToCalendar() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Shifts added to calendar!'),
+        ),
       ),
     );
+
+    if (saved != true || !mounted) return;
+    setState(() {
+      shift
+        ..date = selectedDate
+        ..type = typeController.text.trim().toUpperCase()
+        ..time = timeController.text.trim();
+      if (existing == null) _shifts.add(shift);
+      _shifts.sort((a, b) => a.date.compareTo(b.date));
+    });
   }
+
+  Future<void> _addToCalendar() async {
+    if (_shifts.isEmpty) return;
+    setState(() => _isExporting = true);
+    try {
+      final result = await _calendarService.exportShifts(
+        employeeName: widget.selectedName,
+        shifts: _shifts,
+      );
+      if (!mounted) return;
+      final message = result.exported == 0
+          ? 'No exportable shifts. Add valid times such as 07:00 - 19:00.'
+          : '${result.exported} calendar event${result.exported == 1 ? '' : 's'} opened for export.';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } on Object catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Calendar export failed: $error')));
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
+    }
+  }
+
+  String _formatDate(DateTime date) =>
+      '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Review Your Rota'),
-      ),
+      appBar: AppBar(title: const Text('Review Your Rota')),
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
           Text(
             'Rota for ${widget.selectedName}',
-            style: const TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
-            ),
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
           ),
-
           const SizedBox(height: 8),
-
-          if (widget.rotaRow != null) ...[
-            Text(
-              'Detected OCR cells: '
-              '${widget.rotaRow!.cells.map((cell) => cell.text).join(' | ')}',
-              style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
-            ),
-            const SizedBox(height: 12),
-          ],
-
           const Text(
-            'Check your shifts before adding them to your calendar.',
-            style: TextStyle(
-              fontSize: 16,
+            'Review every shift before exporting it to your calendar.',
+          ),
+          const SizedBox(height: 20),
+          if (_isInterpreting)
+            const Center(
+              child: Column(
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 12),
+                  Text('Interpreting your structured rota…'),
+                ],
+              ),
+            )
+          else ...[
+            if (_interpretationError != null)
+              Card(
+                color: Theme.of(context).colorScheme.errorContainer,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Text(
+                    'AI interpretation unavailable: $_interpretationError\n'
+                    'You can add the shifts manually below.',
+                  ),
+                ),
+              ),
+            if (_showManualFallback) _buildManualOcrHelp(),
+            if (_shifts.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 16),
+                child: Text('No reviewed shifts yet. Add one manually.'),
+              ),
+            ..._shifts.map(_buildShiftCard),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => _editShift(),
+              icon: const Icon(Icons.add),
+              label: const Text('Add shift manually'),
             ),
-          ),
-
-          const SizedBox(height: 20),
-
-          ...List.generate(
-            shifts.length,
-            (index) {
-              final shift = shifts[index];
-
-              return Card(
-                margin: const EdgeInsets.only(
-                  bottom: 12,
-                ),
-                child: ListTile(
-                  leading: const Icon(
-                    Icons.calendar_today,
-                  ),
-                  title: Text(shift.date),
-                  subtitle: Text(
-                    shift.time.isEmpty
-                        ? shift.type
-                        : '${shift.type}\n${shift.time}',
-                  ),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.edit),
-                    onPressed: () {
-                      _editShift(index);
-                    },
-                  ),
-                ),
-              );
-            },
-          ),
-
-          const SizedBox(height: 20),
-
-          ElevatedButton.icon(
-            onPressed: _addToCalendar,
-            icon: const Icon(Icons.calendar_month),
-            label: const Text('Add to Calendar'),
-          ),
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              onPressed: _shifts.isEmpty || _isExporting
+                  ? null
+                  : _addToCalendar,
+              icon: _isExporting
+                  ? const SizedBox(
+                      height: 18,
+                      width: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.calendar_month),
+              label: Text(_isExporting ? 'Exporting…' : 'Add to Calendar'),
+            ),
+          ],
         ],
+      ),
+    );
+  }
+
+  Widget _buildShiftCard(ParsedShift shift) => Card(
+    margin: const EdgeInsets.only(bottom: 12),
+    child: ListTile(
+      leading: Icon(shift.isNonWorking ? Icons.event_busy : Icons.event),
+      title: Text(_formatDate(shift.date)),
+      subtitle: Text(
+        shift.time.isEmpty ? shift.type : '${shift.type}\n${shift.time}',
+      ),
+      trailing: IconButton(
+        icon: const Icon(Icons.edit),
+        onPressed: () => _editShift(shift),
+      ),
+    ),
+  );
+
+  Widget _buildManualOcrHelp() {
+    final row = widget.rotaRow;
+    if (row == null) return const SizedBox.shrink();
+    final cells = row.cells.skip(row.employeeName == null ? 0 : 1);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Text(
+          'OCR cells available for manual entry:\n${cells.map((cell) {
+            final header = widget.cellDateHeaders[cell];
+            return '${cell.text}${header == null ? '' : ' (header: ${header.text})'}';
+          }).join(' | ')}',
+          style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+        ),
       ),
     );
   }

@@ -1,81 +1,15 @@
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
-
-class OcrElement {
-  final String text;
-  final double left;
-  final double top;
-  final double right;
-  final double bottom;
-
-  OcrElement({
-    required this.text,
-    required this.left,
-    required this.top,
-    required this.right,
-    required this.bottom,
-  });
-
-  double get centerX => (left + right) / 2;
-  double get centerY => (top + bottom) / 2;
-  double get height => bottom - top;
-
-  @override
-  String toString() {
-    return '$text '
-        '(x:${left.toStringAsFixed(0)}, '
-        'y:${top.toStringAsFixed(0)})';
-  }
-}
-
-/// A horizontal OCR row, with cells in left-to-right order.
-class RotaRow {
-  final String? employeeName;
-  final double centerY;
-  final List<OcrElement> cells;
-
-  const RotaRow({
-    required this.employeeName,
-    required this.centerY,
-    required this.cells,
-  });
-
-  @override
-  String toString() {
-    final name = employeeName ?? 'unnamed';
-    return '$name (y:${centerY.toStringAsFixed(0)}): '
-        '${cells.map((cell) => cell.text).join(' | ')}';
-  }
-}
-
-class RotaData {
-  final List<String> names;
-  final String rawText;
-  final List<OcrElement> elements;
-  final List<RotaRow> rows;
-  final RotaRow? dateHeaderRow;
-  final List<OcrElement> dateHeaders;
-  final Map<OcrElement, OcrElement> cellDateHeaders;
-
-  RotaData({
-    required this.names,
-    required this.rawText,
-    required this.elements,
-    required this.rows,
-    required this.dateHeaderRow,
-    required this.dateHeaders,
-    required this.cellDateHeaders,
-  });
-}
+import 'models/rota_models.dart';
 
 class OcrService {
-  final TextRecognizer _textRecognizer =
-      TextRecognizer(script: TextRecognitionScript.latin);
+  final TextRecognizer _textRecognizer = TextRecognizer(
+    script: TextRecognitionScript.latin,
+  );
 
   Future<RotaData> processRotaImage(String imagePath) async {
     final inputImage = InputImage.fromFilePath(imagePath);
 
-    final recognizedText =
-        await _textRecognizer.processImage(inputImage);
+    final recognizedText = await _textRecognizer.processImage(inputImage);
 
     final List<OcrElement> elements = [];
 
@@ -98,7 +32,6 @@ class OcrService {
             bottom: box.bottom,
           ),
         );
-
       }
     }
 
@@ -140,7 +73,7 @@ class OcrService {
         final nearestHeader = dateHeaders.reduce((closest, header) {
           final isHeaderCloser =
               (cell.centerX - header.centerX).abs() <
-                  (cell.centerX - closest.centerX).abs();
+              (cell.centerX - closest.centerX).abs();
           return isHeaderCloser ? header : closest;
         });
         matches[cell] = nearestHeader;
@@ -170,9 +103,8 @@ class OcrService {
 
       final cluster = clusters.last;
       final rowCenter = _averageCenterY(cluster);
-      final averageHeight = cluster
-              .map((cell) => cell.height.abs())
-              .reduce((a, b) => a + b) /
+      final averageHeight =
+          cluster.map((cell) => cell.height.abs()).reduce((a, b) => a + b) /
           cluster.length;
       final tolerance = _maxOf([
         minimumTolerance,
@@ -198,8 +130,7 @@ class OcrService {
   }
 
   double _averageCenterY(List<OcrElement> cells) =>
-      cells.map((cell) => cell.centerY).reduce((a, b) => a + b) /
-      cells.length;
+      cells.map((cell) => cell.centerY).reduce((a, b) => a + b) / cells.length;
 
   double _maxOf(List<double> values) =>
       values.reduce((current, next) => current > next ? current : next);
@@ -231,8 +162,7 @@ class OcrService {
     }
     const weekday = r'(?:MON|TUE|WED|THU|FRI|SAT|SUN)';
     const day = r'(?:0?[1-9]|[12][0-9]|3[01])';
-    return RegExp('^(?:${weekday}\\s*${day}|${day}\\s*${weekday})\$')
-        .hasMatch(value);
+    return RegExp('^(?:$weekday\\s*$day|$day\\s*$weekday)\$').hasMatch(value);
   }
 
   bool _looksLikeName(String text) {
