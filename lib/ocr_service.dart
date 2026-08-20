@@ -53,7 +53,7 @@ class OcrService {
     final cellDateHeaders = <OcrElement, OcrElement>{};
 
     final mappedRows = rows.map((row) {
-      if (row.employeeName == null) return row;
+      if (row.employeeName == null || row.cells.isEmpty) return row;
       final expandedCells = <OcrElement>[row.cells.first];
       for (final cell in row.cells.skip(1)) {
         expandedCells.addAll(_splitShiftElement(cell));
@@ -72,11 +72,11 @@ class OcrService {
         cell.columnIndex = column.index;
         cell.columnX = column.centerX;
         cell.headerText = column.headerText;
-        final header = column.headerElements.firstWhere(
-          (element) => _containsDateToken(element),
-          orElse: () => column.headerElements.first,
-        );
-        cellDateHeaders[cell] = header;
+        final dateElements = column.headerElements
+            .where(_containsDateToken)
+            .toList();
+        final header = dateElements.isEmpty ? null : dateElements.first;
+        if (header != null) cellDateHeaders[cell] = header;
       }
     }
 
@@ -142,63 +142,54 @@ class OcrService {
 
   List<RotaColumn> _buildColumns(List<OcrElement> headers) {
     if (headers.isEmpty) return const [];
-    final sorted = [...headers]..sort((a, b) => a.centerX.compareTo(b.centerX));
-    final groups = <List<OcrElement>>[];
-    final spacing = _typicalSpacing(sorted);
-    for (final header in sorted) {
-      if (groups.isEmpty ||
-          (header.centerX - _averageX(groups.last)) > spacing * 0.35) {
-        groups.add([header]);
-      } else {
-        groups.last.add(header);
-      }
+
+    final anchors = <int, OcrElement>{};
+    for (final header in headers) {
+      final match = RegExp(
+        r'^(0?[1-9]|[12][0-9]|3[01])$',
+      ).firstMatch(header.text.trim());
+      final day = match == null ? null : int.tryParse(match.group(1)!);
+      if (day != null) anchors.putIfAbsent(day, () => header);
     }
+
+    final sorted = anchors.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
     return [
-      for (var index = 0; index < groups.length; index++)
+      for (final entry in sorted)
         RotaColumn(
-          index: index,
-          centerX: _averageX(groups[index]),
-          headerText: groups[index]
-              .map((element) => element.text)
-              .toSet()
-              .join(' / '),
-          headerElements: List.unmodifiable(groups[index]),
+          index: entry.key,
+          centerX: entry.value.centerX,
+          headerText: entry.key.toString(),
+          headerElements: [entry.value],
         ),
     ];
   }
 
-  double _typicalSpacing(List<OcrElement> elements) {
-    if (elements.length < 2) return 24;
-    final gaps = <double>[];
-    for (var index = 1; index < elements.length; index++) {
-      final gap = elements[index].centerX - elements[index - 1].centerX;
-      if (gap > 0) gaps.add(gap);
-    }
-    if (gaps.isEmpty) return 24;
-    gaps.sort();
-    return gaps[gaps.length ~/ 2];
-  }
-
   RotaColumn? _columnForX(List<RotaColumn> columns, double x) {
     if (columns.isEmpty) return null;
-    final spacing = columns.length < 2
-        ? 24.0
-        : columns[1].centerX - columns[0].centerX;
-    final edgeTolerance = spacing.abs() * 0.65;
-    if (x < columns.first.centerX - edgeTolerance ||
-        x > columns.last.centerX + edgeTolerance) {
+
+    RotaColumn? closest;
+    double closestDistance = double.infinity;
+
+    for (final column in columns) {
+      final distance = (x - column.centerX).abs();
+
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closest = column;
+      }
+    }
+
+    // Don't attach an OCR cell to a column if it is obviously too far away.
+    final spacing = columns.length > 1
+        ? (columns[1].centerX - columns[0].centerX).abs()
+        : 40.0;
+
+    if (closestDistance > spacing * 0.5) {
       return null;
     }
-    for (var index = 0; index < columns.length; index++) {
-      final left = index == 0
-          ? columns[index].centerX - edgeTolerance
-          : (columns[index - 1].centerX + columns[index].centerX) / 2;
-      final right = index == columns.length - 1
-          ? columns[index].centerX + edgeTolerance
-          : (columns[index].centerX + columns[index + 1].centerX) / 2;
-      if (x >= left && x < right) return columns[index];
-    }
-    return null;
+
+    return closest;
   }
 
   RotaRow? _findDateHeaderRow(
@@ -261,9 +252,6 @@ class OcrService {
       );
     }).toList();
   }
-
-  double _averageX(List<OcrElement> cells) =>
-      cells.map((cell) => cell.centerX).reduce((a, b) => a + b) / cells.length;
 
   double _averageY(List<OcrElement> cells) =>
       cells.map((cell) => cell.centerY).reduce((a, b) => a + b) / cells.length;
